@@ -1,0 +1,6 @@
+detections
+
+.git
+*.pyc
+.venv
+.vscode
