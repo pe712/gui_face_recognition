@@ -11,7 +11,7 @@ import cv2
 import os
 from multiprocessing import Pool, cpu_count
 from PyQt5.QtCore import QRect
-
+import tempfile
 import numpy as np
 
 out_folder = Path("detections")
@@ -19,6 +19,8 @@ out_folder = Path("detections")
 process_number = cpu_count()
 threshold = 0.66
 
+UNKNOWN = "Unknown"
+BAD_QUALITY = "Bad Quality"
 
 class Face:
     def __init__(self, location: list[int], encoding: np.ndarray, tmp_name=None, name=None) -> None:
@@ -112,15 +114,23 @@ detections_folder = out_folder
 
 
 class NameSelector(QWidget):
-    def __init__(self, classified_folder, encoded_img_paths):
+    def __init__(self, classified_folder, encoded_img_folder):
         super().__init__()
         self.classified_folder = classified_folder
-        self.encoded_img_paths = encoded_img_paths
+        
+
+        
+        # make a copy of the generator
+        self.encoded_img_paths = encoded_img_folder.rglob("*")
+        self.init_completions(encoded_img_folder.rglob("*"))
+        
         self.next_image = True
         self.known_faces_encoding = []
         self.known_faces_name = [] # there can be repetitions, it is the same order as the encoding
         self.pickle_path = None
         self.propositions, self.distances = [], []
+
+        self.k = 3
 
         # Set up GUI components
         self.image_label = QLabel()
@@ -130,7 +140,7 @@ class NameSelector(QWidget):
 
         self.propositions_label = QLabel()
         self.submit_button.clicked.connect(self.handle_name)
-        completer = QCompleter()
+        completer = QCompleter(self.completions)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
 
         self.input_field.setCompleter(completer)
@@ -150,17 +160,27 @@ class NameSelector(QWidget):
 
 
     def handle_action(self, action):
-        if action <= 3:
-            self.save_face(self.propositions[action-1])
-        elif action == 4:
-            # Unknown
-            pass
-        elif action == 5:
+        if action < self.k:
+            self.save_face(self.propositions[action])
+        elif action == self.k:
+            self.save_face(UNKNOWN)
+        elif action == self.k+1:
             # Skip all the faces in the image
-            self.next_image = True
-        elif action == 6:
+            self.unknown_for_all_faces = True
+        elif action == self.k+2:
+            self.save_face(BAD_QUALITY)
+        elif action == self.k+3:
+            # Skip all the faces in the image
+            self.bad_quality_for_all_faces = True
+        elif action == self.k+4:
             # Not a face
             self.image_faces.faces.remove(self.face)
+        elif action == self.k+5:
+            # Skip
+            pass
+        elif action == self.k+6:
+            # Skip all the faces in the image
+            self.next_image = True
         self.input_field.clear()
         self.next()
 
@@ -177,8 +197,16 @@ class NameSelector(QWidget):
 
     def save_face(self, name):
         self.face.name = name
+
+        if name == BAD_QUALITY:
+            return
+
         self.known_faces_name.append(name)
         self.known_faces_encoding.append(self.face.encoding)
+        self.completions.add(name)
+
+        if name==UNKNOWN:
+            return
 
         # create dir if not exist
         folder = os.path.join(self.classified_folder, name)
@@ -191,6 +219,9 @@ class NameSelector(QWidget):
 
     def next(self):
         if self.next_image:
+            self.bad_quality_for_all_faces = False
+            self.unknown_for_all_faces = False
+
             if self.pickle_path:
                 # save back the image_faces with the names
                 with open(self.pickle_path, 'wb') as f:
@@ -199,7 +230,7 @@ class NameSelector(QWidget):
             try: 
                 self.pickle_path = next(self.encoded_img_paths)
             except StopIteration:
-                print("no more images")
+                print("No more images !")
                 exit(0)
 
             try: 
@@ -216,12 +247,22 @@ class NameSelector(QWidget):
 
         try:
             self.face = next(self.faces)
+            if self.bad_quality_for_all_faces:
+                self.save_face(BAD_QUALITY)
+                self.next()
+                return
+            if self.unknown_for_all_faces:
+                self.save_face(UNKNOWN)
+                self.next()
         except StopIteration:
             self.next_image = True
             self.next()
             return
 
         if self.face.name:
+            # if self.face.name == BAD_QUALITY or self.face.name == UNKNOWN:
+            #     self.face.name = None
+            # else:    
             print(f"known photo {self.image_faces.image_path} containing {self.face.name}")
             self.save_face(self.face.name)
             self.next()
@@ -245,10 +286,10 @@ class NameSelector(QWidget):
             self.known_faces_encoding,
             self.face.encoding
         )
-        # reverse sort and select the 3 lowest distances
+        # reverse sort and select the k lowest distances
         # TODO: optimize
         matcher = -np.argsort(-self.distances) # reverse sort
-        proposer = matcher[:3]
+        proposer = matcher[:self.k]
         self.distances = self.distances[proposer]
         if self.distances[0] < threshold:
             name = self.known_faces_name[proposer[0]]
@@ -261,24 +302,35 @@ class NameSelector(QWidget):
             self.render_propositions()
 
     def render_propositions(self):
-        propositions_lines = [f"{i+1} : {prop} ({score})" for i,
+        propositions_lines = [f"{i} : {prop} ({score})" for i,
                         (prop, score) in enumerate(zip(self.propositions, self.distances))]
-        propositions_lines.append("4 : Unknown")
-        propositions_lines.append("5 : Unknown for all faces in the image")
-        propositions_lines.append("6 : Not a face")
+        propositions_lines.append(f"{self.k} : Unknown")
+        propositions_lines.append(f"{self.k+1} : Unknown for all faces in the image")
+        propositions_lines.append(f"{self.k+2} : Bad quality")
+        propositions_lines.append(f"{self.k+3} : Bad quality for all faces in the image")
+        propositions_lines.append(f"{self.k+4} : Not a face")
+        propositions_lines.append(f"{self.k+5} : Skip")
+        propositions_lines.append(f"{self.k+6} : Skip all faces in the image")
         self.propositions_label.setText(
             "\n".join(propositions_lines)
         )
 
+    def init_completions(self, list_encoded_img_paths):
+        self.completions = set()
+        for encoded_img_path in list_encoded_img_paths:
+            with open(encoded_img_path, 'rb') as f:
+                image_faces = pickle.load(f)
+                for face in image_faces.faces:
+                    if face.name and face.name!=BAD_QUALITY and face.name!=UNKNOWN:
+                        self.completions.add(face.name)
 
 class Editor(QLineEdit):
     def __init__(self):
         super().__init__()
 
     def clear(self):
-        super().clear()
-        unique_known_faces_name = set(self.parent().known_faces_name)
-        self.completer().setModel(QStringListModel(unique_known_faces_name))
+        super().clear()        
+        self.completer().setModel(QStringListModel(self.parent().completions))
 
     def keyPressEvent(self, event):
         super().keyPressEvent(event)
@@ -289,9 +341,9 @@ class Editor(QLineEdit):
             self.parent().handle_name()
 
 
-def run_name_selector(classified_folder, encoded_img_paths):
+def run_name_selector(classified_folder, encoded_img_folder):
     app = QApplication(sys.argv)
-    window = NameSelector(classified_folder, encoded_img_paths)
+    window = NameSelector(classified_folder, encoded_img_folder)
     window.show()
     sys.exit(app.exec_())
 
@@ -309,7 +361,11 @@ def main():
     if not os.path.isdir(out_folder):
         os.makedirs(out_folder)
     folder = Path(args.folder)
-    classified_folder =    folder.parent/Path("classified")
+    classified_folder = None
+    if not classified_folder:
+        temp_dir = Path(tempfile.mkdtemp())
+        classified_folder =    temp_dir/Path("classified")
+    print(f"classified photos: {classified_folder}")
     image_paths = folder.rglob("*")
     if args.restart:
         # select the files of every subfolder and remove them using pathlib
@@ -318,9 +374,8 @@ def main():
     if not args.compare:
         detect_faces(image_paths)
 
-    encoded_img_paths = Path(out_folder).rglob("*.pickle")
-    run_name_selector(classified_folder, encoded_img_paths)
-
+    encoded_img_folder = Path(out_folder)
+    run_name_selector(classified_folder, encoded_img_folder)
 
 if __name__ == "__main__":
     main()
