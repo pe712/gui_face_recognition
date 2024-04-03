@@ -1,3 +1,4 @@
+from typing import Iterable
 from PyQt5.QtCore import QStringListModel
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap, QImage
@@ -7,128 +8,44 @@ import pickle
 import face_recognition
 from pathlib import Path
 import argparse
-import cv2
 import os
-from multiprocessing import Pool, cpu_count
 from PyQt5.QtCore import QRect
 import tempfile
 import numpy as np
 
-out_folder = Path("detections")
+from face import Face, Image # needed for the pickle loading
+from face import FaceDetector
+from contacts import CSV
 
-process_number = cpu_count()
+out_folder = Path("detections")
+detections_folder = out_folder
+
 threshold = 0.66
 
 UNKNOWN = "Unknown"
 BAD_QUALITY = "Bad Quality"
-
-class Face:
-    def __init__(self, location: list[int], encoding: np.ndarray, tmp_name=None, name=None) -> None:
-        self.location = location
-        self.encoding = encoding
-        self.tmp_name = tmp_name
-        self.name = name
-
-
-class ImageFaces:
-    def __init__(self, image_path: str | Path, locations: list, encodings: list) -> None:
-        self.faces = []
-        self.image_path = image_path
-        x_coors = np.array([l[1] for l in locations])
-        sort_idxs = np.argsort(x_coors)
-        for idx in sort_idxs:
-            face = Face(locations[idx], encodings[idx])
-            self.faces.append(face)
-
-
-def detect_faces(image_paths):
-    pool = Pool(process_number)
-    pool.map(detect_face, image_paths)
-    pool.close()
-    pool.join()
-
-
-def compare_faces(encoded_img_paths):
-    unclassified_images = []
-    pickle_paths = []
-    for encoded_img_path in encoded_img_paths:
-        with open(encoded_img_path, 'rb') as f:
-            unclassified_images.append(pickle.load(f))
-            pickle_paths.append(encoded_img_path)
-
-    print(f"iterating through the {len(unclassified_images)} images")
-    known_faces = []
-    while len(unclassified_images) > 0:
-        image_faces = unclassified_images.pop()
-        pickle_path = pickle_paths.pop()
-        image = cv2.imread(str(image_faces.image_path))
-        print(f"iterating on {image_faces.image_path}")
-        print(len(image_faces.faces))
-        for face in image_faces.faces:
-            if not known_faces:
-                face.tmp_name = 0
-                known_faces.append(face.encoding)
-                continue
-            distances = face_recognition.face_distance(
-                known_faces, face.encoding)
-            matcher = np.argmin(distances)
-            print(distances.shape, distances[matcher])
-            if distances[matcher] < threshold:
-                face.tmp_name = matcher
-            else:
-                face.tmp_name = len(known_faces)
-            known_faces.append(face.encoding)
-            location = face.location
-            start_point, end_point = (
-                location[1], location[0]), (location[3], location[2])
-            cv2.rectangle(image, start_point, end_point, 100)
-            cv2.putText(image, str(face.tmp_name), start_point,
-                        cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 0, 0), 6)
-
-        # save back the image_faces with the names
-        with open(pickle_path, 'wb') as f:
-            # pickle.dump(image_faces, f)
-            pass
-
-        cv2.imwrite(os.path.join(
-            out_folder, image_faces.image_path.name), image)
-
-
-def detect_face(image_path):
-    print(f"detecting on {image_path}")
-    out_path = os.path.join(out_folder, image_path.stem+".pickle")
-    if os.path.exists(out_path):
-        return
-
-    image = face_recognition.load_image_file(image_path, mode='RGB')
-    locations = face_recognition.face_locations(image)
-    encodings = face_recognition.face_encodings(
-        image, known_face_locations=locations)
-    image_faces = ImageFaces(image_path, locations, encodings)
-
-    with open(out_path, 'wb') as f:
-        pickle.dump(image_faces, f)
-
-
-detections_folder = out_folder
-
+AUTO = "Auto"
+SKIPPED = "Skipped"
+IMAGE_COUNT = "Image count"
 
 class NameSelector(QWidget):
-    def __init__(self, classified_folder, encoded_img_folder):
+    def __init__(self, classified_folder, encoded_img_folder, contacts):
         super().__init__()
         self.classified_folder = classified_folder
         
-
-        
         # make a copy of the generator
-        self.encoded_img_paths = encoded_img_folder.rglob("*")
-        self.init_completions(encoded_img_folder.rglob("*"))
+        self.encoded_img_paths = encoded_img_folder.glob("*")
+        self.init_completions(encoded_img_folder.glob("*"), contacts)
         
         self.next_image = True
         self.known_faces_encoding = []
         self.known_faces_name = [] # there can be repetitions, it is the same order as the encoding
         self.pickle_path = None
+        self.previous_pickle_path = None # the last action
+        self.reverting = False
         self.propositions, self.distances = [], []
+        
+        self.stats = {BAD_QUALITY: 0, UNKNOWN: 0, AUTO: 0, SKIPPED: 0, IMAGE_COUNT: 0}
 
         self.k = 3
 
@@ -137,9 +54,11 @@ class NameSelector(QWidget):
         self.input_label = QLabel("Enter name or number:")
         self.input_field = Editor()
         self.submit_button = QPushButton("Submit")
+        self.revert_button = QPushButton("Revert")
 
         self.propositions_label = QLabel()
-        self.submit_button.clicked.connect(self.handle_name)
+        self.submit_button.clicked.connect(self.submit)
+        self.revert_button.clicked.connect(self.revert)
         completer = QCompleter(self.completions)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
 
@@ -152,131 +71,206 @@ class NameSelector(QWidget):
         self.layout.addWidget(self.input_label)
         self.layout.addWidget(self.input_field)
         self.layout.addWidget(self.submit_button)
+        self.layout.addWidget(self.revert_button)
         self.setLayout(self.layout)
         self.input_field.setFocus()
-        self.next()
+        self.next(action=False)
+    
+    def closeEvent(self, event):
+        self.print_stats()
+        return super().closeEvent(event)
 
-        # Set focus to input field
-
-
+    def submit(self):
+        self.handle_name()
+        self.input_field.setFocus()
+        
+    def callback_action(self):
+        self.previous_pickle_path = self.pickle_path
+        self.previous_face = self.face
+        self.previous_index = len(self.known_faces_name)-1
+    
     def handle_action(self, action):
         if action < self.k:
             self.save_face(self.propositions[action])
         elif action == self.k:
             self.save_face(UNKNOWN)
         elif action == self.k+1:
-            # Skip all the faces in the image
             self.unknown_for_all_faces = True
         elif action == self.k+2:
             self.save_face(BAD_QUALITY)
         elif action == self.k+3:
-            # Skip all the faces in the image
             self.bad_quality_for_all_faces = True
         elif action == self.k+4:
             # Not a face
-            self.image_faces.faces.remove(self.face)
+            self.image.faces.remove(self.face)
+            self.next()
         elif action == self.k+5:
             # Skip
-            pass
+            self.update_stats(skip=True)
+            return self.next()
         elif action == self.k+6:
             # Skip all the faces in the image
+            self.update_stats(skip_all=True)
             self.next_image = True
-        self.input_field.clear()
-        self.next()
+            return self.next()
 
     def handle_name(self):
         user_input = self.input_field.text()
-        if user_input.isdigit():
-            return self.handle_action(int(user_input))
-        else:
-            user_input = ' '.join(word.capitalize()
-                                    for word in user_input.split())
-            self.save_face(user_input)
-        self.input_field.clear()
-        self.next()
+        user_input = ' '.join(word.capitalize()
+                                for word in user_input.split())
+        self.save_face(user_input)
 
-    def save_face(self, name):
+    def save_face(self, name, auto=False, action=True):
+        print(f"saving {name}, action: {action}")
         self.face.name = name
+        self.face.auto = auto
+        self.update_stats()
 
         if name == BAD_QUALITY:
-            return
+            return self.next(action=action)
 
-        self.known_faces_name.append(name)
-        self.known_faces_encoding.append(self.face.encoding)
-        self.completions.add(name)
+        if self.reverting:
+            self.known_faces_name[self.previous_index] = name
+            self.known_faces_encoding[self.previous_index] = self.face.encoding
+            self.reverting = False
+        else:
+            self.known_faces_name.append(name)
+            self.known_faces_encoding.append(self.face.encoding)
+            self.completions.add(name)
 
         if name==UNKNOWN:
-            return
+            return self.next(action=action)
 
         # create dir if not exist
         folder = os.path.join(self.classified_folder, name)
         if not os.path.isdir(folder):
             os.makedirs(folder)
         # create a simlink to the image
-        path = os.path.join(folder, self.image_faces.image_path.name)
+        path = os.path.join(folder, self.image.image_path.name)
         if not os.path.islink(path):
-            os.symlink(self.image_faces.image_path, path)
+            os.symlink(self.image.image_path, path)
+        
+        self.next(action=action)
 
-    def next(self):
+    def update_stats(self, skip=False, skip_all=False, next_image=False):
+        if skip_all:
+            self.stats[SKIPPED] += len(self.image.faces)
+            return
+        if skip:
+            self.stats[SKIPPED] += 1
+            return
+        if next_image:
+            self.stats[IMAGE_COUNT] += 1
+            return
+        if self.face.name == BAD_QUALITY:
+            self.stats[BAD_QUALITY] += 1
+        elif self.face.name == UNKNOWN:
+            self.stats[UNKNOWN] += 1
+        if self.face.auto:
+            self.stats[AUTO] += 1
+    
+    def print_stats(self):
+        print("Stats:")
+        total = 0
+        for name, count in self.stats.items():
+            print(f"{name}: {count}")
+            total += count
+        print(f"Number of faces: {total}")
+        
+    def next(self, action=True):
+        if action:
+            self.callback_action()
+        self.input_field.clear()
         if self.next_image:
+            self.update_stats(next_image=True)
             self.bad_quality_for_all_faces = False
             self.unknown_for_all_faces = False
 
             if self.pickle_path:
                 # save back the image_faces with the names
                 with open(self.pickle_path, 'wb') as f:
-                    pickle.dump(self.image_faces, f)
+                    pickle.dump(self.image, f)
 
             try: 
                 self.pickle_path = next(self.encoded_img_paths)
             except StopIteration:
                 print("No more images !")
+                self.print_stats()
                 exit(0)
 
             try: 
                 with open(self.pickle_path, 'rb') as f:
-                    self.image_faces = pickle.load(f)
+                    self.image = pickle.load(f)
             except:
                 print(f"error loading {self.pickle_path}")
                 print("skipping")
                 self.pickle_path = None
-                self.next()
+                self.next(action=False)
                 
-            self.faces = iter(self.image_faces.faces)
+            self.faces = iter(self.image.faces)
             self.next_image = False
 
         try:
             self.face = next(self.faces)
             if self.bad_quality_for_all_faces:
                 self.save_face(BAD_QUALITY)
-                self.next()
                 return
             if self.unknown_for_all_faces:
                 self.save_face(UNKNOWN)
-                self.next()
         except StopIteration:
             self.next_image = True
-            self.next()
-            return
+            return self.next(action=False)
 
         if self.face.name:
             # if self.face.name == BAD_QUALITY or self.face.name == UNKNOWN:
             #     self.face.name = None
             # else:    
-            print(f"known photo {self.image_faces.image_path} containing {self.face.name}")
-            self.save_face(self.face.name)
-            self.next()
+            print(f"known photo {self.image.image_path} containing {self.face.name}")
+            self.save_face(self.face.name, action=False)
             return
-        imgdata = open(self.image_faces.image_path, 'rb').read()
-        image = QImage.fromData(imgdata, self.image_faces.image_path.suffix)
+        self.load_face()
+    
+    def load_face(self):
+        imgdata = open(self.image.image_path, 'rb').read()
+        qimage = QImage.fromData(imgdata, self.image.image_path.suffix)
         top, right, bottom, left = self.face.location
         width, heigth = right - left, bottom - top
         rect = QRect(left, top, width, heigth)
-        image = image.copy(rect)
-        pixmap = QPixmap.fromImage(image)
+        qimage = qimage.copy(rect)
+        pixmap = QPixmap.fromImage(qimage)
         pixmap = pixmap.scaled(400, 400, Qt.KeepAspectRatio)
         self.image_label.setPixmap(pixmap)
         self.make_propositions()
+
+    def revert(self):
+        if not self.previous_pickle_path:
+            print("No previous action")
+            return
+        print(f"Reverting {self.previous_pickle_path}")
+        with open(self.pickle_path, 'wb') as f:
+            pickle.dump(self.image, f)
+        self.pickle_path = self.previous_pickle_path
+        try: 
+            with open(self.pickle_path, 'rb') as f:
+                self.image = pickle.load(f)
+        except:
+            print(f"error loading {self.pickle_path}")
+            print("skipping")
+            self.pickle_path = None
+            return self.next(action=False)
+                
+        self.next_image = False
+        for face in self.image.faces:
+            if (face.encoding == self.previous_face.encoding).all():
+                self.face = face # need to point to the object belong to the Image object
+                break
+        self.load_face()
+
+        self.previous_pickle_path = None
+        self.previous_face = None
+        self.reverting = True
+        
+        self.input_field.setFocus()
 
     def make_propositions(self):
         if not self.known_faces_encoding:
@@ -293,8 +287,8 @@ class NameSelector(QWidget):
         self.distances = self.distances[proposer]
         if self.distances[0] < threshold:
             name = self.known_faces_name[proposer[0]]
-            print(f"skipped photo {self.image_faces.image_path} containing {name} with distance {self.distances[0]}")
-            self.save_face(name)
+            print(f"skipped photo {self.image.image_path} containing {name} with distance {self.distances[0]}")
+            self.save_face(name, auto=True, action=False)
         else:
             self.propositions = [
                 self.known_faces_name[i] for i in proposer
@@ -315,12 +309,14 @@ class NameSelector(QWidget):
             "\n".join(propositions_lines)
         )
 
-    def init_completions(self, list_encoded_img_paths):
+    def init_completions(self, list_encoded_img_paths, contacts: Iterable):
         self.completions = set()
+        if contacts:
+            self.completions.update(contacts)
         for encoded_img_path in list_encoded_img_paths:
             with open(encoded_img_path, 'rb') as f:
-                image_faces = pickle.load(f)
-                for face in image_faces.faces:
+                image = pickle.load(f)
+                for face in image.faces:
                     if face.name and face.name!=BAD_QUALITY and face.name!=UNKNOWN:
                         self.completions.add(face.name)
 
@@ -341,9 +337,9 @@ class Editor(QLineEdit):
             self.parent().handle_name()
 
 
-def run_name_selector(classified_folder, encoded_img_folder):
+def run_name_selector(classified_folder, encoded_img_folder, contacts):
     app = QApplication(sys.argv)
-    window = NameSelector(classified_folder, encoded_img_folder)
+    window = NameSelector(classified_folder, encoded_img_folder, contacts)
     window.show()
     sys.exit(app.exec_())
 
@@ -354,9 +350,12 @@ def main():
     parser.add_argument(
         '-f', '--folder', help='Picture folders', type=str, default='demo')
     parser.add_argument(
-        '-c', '--compare', help='Compare the created encoding only', action='store_true')
+        '-s', '--skip', help='Skip encoding and perform name attribution', action='store_true')
     parser.add_argument(
         '-r', '--restart', help='Restart the classification', action='store_true')
+    parser.add_argument(
+        '-c', '--contact', help='Contact file path to look for names', type=str, default=None
+        )
     args = parser.parse_args()
     if not os.path.isdir(out_folder):
         os.makedirs(out_folder)
@@ -366,16 +365,23 @@ def main():
         temp_dir = Path(tempfile.mkdtemp())
         classified_folder =    temp_dir/Path("classified")
     print(f"classified photos: {classified_folder}")
-    image_paths = folder.rglob("*")
     if args.restart:
         # select the files of every subfolder and remove them using pathlib
         for file in classified_folder.glob("*/*"):
             os.remove(file)
-    if not args.compare:
-        detect_faces(image_paths)
+
+    if not args.skip:
+        face_detector = FaceDetector(folder, out_folder)
+        face_detector.detect_faces()
+
+    contact_file_path = args.contact
+    contacts = None
+    if contact_file_path:
+        contacts = CSV(contact_file_path).contacts
+
 
     encoded_img_folder = Path(out_folder)
-    run_name_selector(classified_folder, encoded_img_folder)
+    run_name_selector(classified_folder, encoded_img_folder, contacts)
 
 if __name__ == "__main__":
     main()
