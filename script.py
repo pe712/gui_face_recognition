@@ -20,7 +20,6 @@ from contacts import CSV
 out_folder = Path("detections")
 detections_folder = out_folder
 
-threshold = 0.66
 
 UNKNOWN = "Unknown"
 BAD_QUALITY = "Bad Quality"
@@ -29,11 +28,13 @@ SKIPPED = "Skipped"
 IMAGE_COUNT = "Image count"
 
 class NameSelector(QWidget):
-    def __init__(self, classified_folder, encoded_img_folder, contacts):
+    def __init__(self, classified_folder, encoded_img_folder, contacts, name=None):
         super().__init__()
         self.classified_folder = classified_folder
+        self.name = name
         
         # make a copy of the generator
+        self.encoded_img_folder = encoded_img_folder
         self.encoded_img_paths = encoded_img_folder.glob("*")
         self.init_completions(encoded_img_folder.glob("*"), contacts)
         
@@ -44,6 +45,8 @@ class NameSelector(QWidget):
         self.previous_pickle_path = None # the last action
         self.reverting = False
         self.propositions, self.distances = [], []
+
+        self.threshold = 0.66
         
         self.stats = {BAD_QUALITY: 0, UNKNOWN: 0, AUTO: 0, SKIPPED: 0, IMAGE_COUNT: 0}
 
@@ -74,8 +77,54 @@ class NameSelector(QWidget):
         self.layout.addWidget(self.revert_button)
         self.setLayout(self.layout)
         self.input_field.setFocus()
-        self.next(action=False)
+        
+        if self.name:
+            self.perform_lookup()
+        
+        else:
+            self.next(action=False)
     
+    def perform_lookup(self):
+        self.second_run_encoded_img_path = []
+        self.load_known()
+        self.match_and_lookup()
+        print(f"Results in {self.classified_folder}")
+    
+    def load_known(self):
+        for self.pickle_path in self.encoded_img_paths:
+            try: 
+                with open(self.pickle_path, 'rb') as f:
+                    self.image = pickle.load(f)
+            except:
+                print(f"error loading {self.pickle_path}")
+                print("skipping")
+                continue
+
+            for self.face in self.image.faces:
+                if self.face.name and self.face.name==self.name:
+                    print(f"known photo {self.image.image_path} containing {self.face.name}")
+                    self.save_face(self.face.name, action=False)
+                else:
+                    self.second_run_encoded_img_path.append(self.pickle_path)
+
+    def match_and_lookup(self):
+        for self.pickle_path in self.second_run_encoded_img_path:
+            try: 
+                with open(self.pickle_path, 'rb') as f:
+                    self.image = pickle.load(f)
+            except:
+                print(f"error loading {self.pickle_path}")
+                print("skipping")
+                continue
+
+            for self.face in self.image.faces:
+                if not self.face.name:
+                    self.make_propositions() # can match with one known faces
+            with open(self.pickle_path, 'wb') as f:
+                pickle.dump(self.image, f)
+
+            
+        
     def closeEvent(self, event):
         self.print_stats()
         return super().closeEvent(event)
@@ -285,7 +334,7 @@ class NameSelector(QWidget):
         matcher = -np.argsort(-self.distances) # reverse sort
         proposer = matcher[:self.k]
         self.distances = self.distances[proposer]
-        if self.distances[0] < threshold:
+        if self.distances[0] < self.threshold:
             name = self.known_faces_name[proposer[0]]
             print(f"skipped photo {self.image.image_path} containing {name} with distance {self.distances[0]}")
             self.save_face(name, auto=True, action=False)
@@ -309,7 +358,7 @@ class NameSelector(QWidget):
             "\n".join(propositions_lines)
         )
 
-    def init_completions(self, list_encoded_img_paths, contacts: Iterable):
+    def init_completions(self, list_encoded_img_paths, contacts: Iterable|None):
         self.completions = set()
         if contacts:
             self.completions.update(contacts)
@@ -343,6 +392,13 @@ def run_name_selector(classified_folder, encoded_img_folder, contacts):
     window.show()
     sys.exit(app.exec_())
 
+def perform_lookup(classified_folder, encoded_img_folder, name):
+    app = QApplication(sys.argv)
+    window = NameSelector(classified_folder, encoded_img_folder, None, name=name)
+    window.show()
+    sys.exit(app.exec_())
+
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -356,6 +412,9 @@ def main():
     parser.add_argument(
         '-c', '--contact', help='Contact file path to look for names', type=str, default=None
         )
+    parser.add_argument(
+        '-e', '--eval', help='Use the training to look for someone', type=str, default=None
+    )
     args = parser.parse_args()
     if not os.path.isdir(out_folder):
         os.makedirs(out_folder)
@@ -373,15 +432,19 @@ def main():
     if not args.skip:
         face_detector = FaceDetector(folder, out_folder)
         face_detector.detect_faces()
+    
+    name = args.eval
 
     contact_file_path = args.contact
     contacts = None
     if contact_file_path:
         contacts = CSV(contact_file_path).contacts
 
-
     encoded_img_folder = Path(out_folder)
-    run_name_selector(classified_folder, encoded_img_folder, contacts)
+    if args.eval:
+        perform_lookup(classified_folder, encoded_img_folder, name)
+    else:
+        run_name_selector(classified_folder, encoded_img_folder, contacts)
 
 if __name__ == "__main__":
     main()
