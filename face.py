@@ -1,9 +1,10 @@
+from multiprocessing import Pool, cpu_count
 import os
 from pathlib import Path
 import pickle
 import numpy as np
 import face_recognition
-from PyQt5.QtCore import QRunnable, pyqtSignal
+from PyQt5.QtCore import QRunnable, pyqtSignal, QThread,QObject
 
 
 class Face:
@@ -26,56 +27,42 @@ class Image:
             face = Face(locations[idx], encodings[idx])
             self.faces.append(face)
 
-class FaceDetector(QRunnable):
-    def __init__(self, image_path:Path, encodings_folder:Path):
-        self.image_path = image_path
-        self.encodings_folder= encodings_folder
+class FaceDetector:
+    @staticmethod
+    def run(args):
+        image_path, encodings_folder = args
+        if not image_path.is_file():
+            return
+        print(f"Detecting faces: {image_path.name}")
+        out_path = os.path.join(encodings_folder, image_path.stem+".pickle")
+        if os.path.exists(out_path):
+            return
+
+        image = face_recognition.load_image_file(image_path, mode='RGB')
+        locations = face_recognition.face_locations(image)
+        encodings = face_recognition.face_encodings(
+            image, 
+            known_face_locations=locations
+            )
+        image = Image(image_path, locations, encodings)
+
+        with open(out_path, 'wb') as f:
+            pickle.dump(image, f)
+    
+class LaunchMultiprocessingPool(QObject):
+    finished = pyqtSignal()
+
+    def __init__(self, args):
         super().__init__()
+        self.args = args
+        num_cores = cpu_count()
+        self.pool = Pool(num_cores*2)
         
     def run(self):
-        if not self.image_path.is_file():
-            print("wtf")
-            return
-        print(f"Detecting faces: {self.image_path.name}")
-        out_path = os.path.join(self.encodings_folder, self.image_path.stem+".pickle")
-        if os.path.exists(out_path):
-            print("wtf")
-            return
-
-        image = face_recognition.load_image_file(self.image_path, mode='RGB')
-        locations = face_recognition.face_locations(image)
-        encodings = face_recognition.face_encodings(
-            image, 
-            known_face_locations=locations
-            )
-        image = Image(self.image_path, locations, encodings)
-
-        with open(out_path, 'wb') as f:
-            pickle.dump(image, f)
-        print("ok")
-
-class NotThreadedFaceDetector:
-    def __init__(self, image_path:Path, encodings_folder:Path):
-        self.image_path = image_path
-        self.encodings_folder= encodings_folder
-        
-    def run(self):
-        if not self.image_path.is_file():
-            return
-        print(f"Detecting faces: {self.image_path.name}")
-        out_path = os.path.join(self.encodings_folder, self.image_path.stem+".pickle")
-        if os.path.exists(out_path):
-            return
-
-        image = face_recognition.load_image_file(self.image_path, mode='RGB')
-        locations = face_recognition.face_locations(image)
-        encodings = face_recognition.face_encodings(
-            image, 
-            known_face_locations=locations
-            )
-        image = Image(self.image_path, locations, encodings)
-
-        with open(out_path, 'wb') as f:
-            pickle.dump(image, f)
-
-        
+        self.pool.map(FaceDetector.run, self.args)
+        self.pool.close()
+        self.pool.join()
+    
+    def deleteLater(self):
+        self.pool.terminate()
+        return super().deleteLater()

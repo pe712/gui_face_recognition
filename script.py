@@ -1,5 +1,6 @@
+from multiprocessing import Pool, cpu_count
 import time
-from PyQt5.QtCore import QStringListModel, Qt, QThreadPool
+from PyQt5.QtCore import QStringListModel, Qt, QThreadPool, QThread
 from PyQt5.QtGui import QPixmap, QImage, QCloseEvent
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QCompleter, QFileDialog, QCheckBox, QLayout
 import sys
@@ -7,8 +8,9 @@ from pathlib import Path
 from PyQt5.QtCore import QRect
 import tempfile
 from classification import BAD_QUALITY, UNKNOWN, FaceClassifier
+from concurrent.futures import ThreadPoolExecutor
 
-from face import FaceDetector, NotThreadedFaceDetector
+from face import FaceDetector, LaunchMultiprocessingPool
 from contacts import CSV
 
 
@@ -112,23 +114,29 @@ class NameSelector(QWidget):
             self.image_paths = self.image_folder.rglob("*")
         else:
             self.image_paths = self.image_folder.glob("*")
+        args = [(image_path, self.encodings_folder) for image_path in self.image_paths]
+
+        self.thread = QThread()
+        self.worker = LaunchMultiprocessingPool(args)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.thread.finished.connect(self.stop_encodings)
+        self.thread.start()
+        
         info_label = QLabel("Detecting faces...\nThis may take a while\nUser intervention is not required")
+        stop_button = QPushButton("Stop")
+        stop_button.clicked.connect(self.stop_encodings)
+        
         self.resetLayout()
         self.layout.addWidget(info_label)
-        # pool = QThreadPool(self)
-        # self.image_paths = list(self.image_paths)
-        # n = len(self.image_paths)
-        # for i in range(n%4):
-        #     for image_path in self.image_paths[i:i+4]:
-        #         runnable = FaceDetector(image_path, self.encodings_folder)
-        #         pool.start(runnable)
-        #     print("batch doing")
-        #     pool.waitForDone()
-        #     print("batch done")
-        for image_path in self.image_paths:
-            NotThreadedFaceDetector(image_path, self.image_folder).run()
-        self.set_main_layout()
+        self.layout.addWidget(stop_button)
 
+    
+    def stop_encodings(self):
+        self.worker.deleteLater()
+        self.thread.quit()
+        self.set_main_layout()
+    
     def lookup(self):
         submit_button = QPushButton("Submit")
         submit_button.clicked.connect(self.perform_lookup)
