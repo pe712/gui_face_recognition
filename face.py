@@ -62,7 +62,8 @@ class LaunchMultiprocessingPool(QObject):
         self.pool.map(FaceDetector.run, self.args)
         self.pool.close()
         self.pool.join()
+        self.finished.emit()
     
-    def deleteLater(self):
+    def deleteLater(self) -> None:
         self.pool.terminate()
-        return super().deleteLater()
+        super().deleteLater()

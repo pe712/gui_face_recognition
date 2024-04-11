@@ -1,6 +1,7 @@
 from multiprocessing import Pool, cpu_count
+import subprocess
 import time
-from PyQt5.QtCore import QStringListModel, Qt, QThreadPool, QThread
+from PyQt5.QtCore import QStringListModel, Qt, QThreadPool, QThread, QTimer
 from PyQt5.QtGui import QPixmap, QImage, QCloseEvent
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QCompleter, QFileDialog, QCheckBox, QLayout
 import sys
@@ -12,7 +13,26 @@ from concurrent.futures import ThreadPoolExecutor
 
 from face import FaceDetector, LaunchMultiprocessingPool
 from contacts import CSV
+from PyQt5 import QtTest
 
+class Editor(QLineEdit):
+    def clear(self):
+        super().clear()        
+        self.completer().setModel(QStringListModel(self.parent().face_classifier.known_names))
+
+    def keyPressEvent(self, event):
+        super().keyPressEvent(event)
+        text = event.text()
+        if text.isdigit():
+            self.parent().handle_action(int(text))
+        elif event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+            self.parent().handle_name()
+
+class Looker(Editor):
+    def keyPressEvent(self, event):
+        QLineEdit.keyPressEvent(self, event)
+        if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+            self.parent().perform_lookup()
 
 class NameSelector(QWidget):
     def __init__(self):
@@ -23,13 +43,24 @@ class NameSelector(QWidget):
         temp_dir = Path(tempfile.mkdtemp())
         self.classified_folder = temp_dir/Path("classified")
         self.encodings_folder = Path("encodings")
-
+        self.contacts_folder = Path("contacts")
+                
         self.k = 3
         self.face_classifier = FaceClassifier(self.classified_folder, self.encodings_folder, self.k)
 
         # self.logs_field = QLabel() # TODO
-
+        self.initialize()
         self.set_main_layout()
+    
+    def initialize(self):
+        folders = [self.classified_folder, self.encodings_folder, self.contacts_folder]
+        for folder in folders:
+            if not folder.exists():
+                folder.mkdir()
+        for file in self.contacts_folder.glob("*.csv"):
+            contacts = CSV(file).contacts
+            n = self.face_classifier.add_contacts(contacts)
+            print(f"{n} contacts successfully added")
     
     def set_main_layout(self):
         self.add_contacts_button = QPushButton("Add contacts")
@@ -56,8 +87,8 @@ class NameSelector(QWidget):
         for widget in main_layout_widgets:
             self.layout.addWidget(widget)
     
-    def add_research_widget(self):
-        self.input_field = Editor()
+    def add_research_widget(self, field_class=Editor):
+        self.input_field = field_class()
         completer = QCompleter(self.face_classifier.known_names)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         self.input_field.setCompleter(completer)
@@ -78,14 +109,17 @@ class NameSelector(QWidget):
         self.layout.addWidget(contact_file_button)
 
     def get_contact_file(self):
-        contact_file_path = QFileDialog.getOpenFileName(self, "Select a file with contacts")[0]
+        contact_file_path = Path(QFileDialog.getOpenFileName(self, "Select a file with contacts")[0])
         self.contacts = CSV(contact_file_path).contacts
-        contact_file_label = QLabel(contact_file_path)
+        save_path = self.contacts_folder/contact_file_path.name
+        save_path.write_bytes(contact_file_path.read_bytes())
+        
+        contact_file_label = QLabel(contact_file_path.name)
         submit_button = QPushButton("Submit")
         submit_button.clicked.connect(self.perform_add_contacts)
         self.layout.addWidget(contact_file_label)
         self.layout.addWidget(submit_button)
-
+    
     def perform_add_contacts(self):
         n = self.face_classifier.add_contacts(self.contacts)
         self.set_main_layout()
@@ -116,15 +150,14 @@ class NameSelector(QWidget):
             self.image_paths = self.image_folder.glob("*")
         args = [(image_path, self.encodings_folder) for image_path in self.image_paths]
 
-        self.thread = QThread()
+        self.thread = QThread(self)
         self.worker = LaunchMultiprocessingPool(args)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.thread.finished.connect(self.stop_encodings)
         self.thread.start()
-        
         info_label = QLabel("Detecting faces...\nThis may take a while\nUser intervention is not required")
-        stop_button = QPushButton("Stop")
+        stop_button = QPushButton("Return")
         stop_button.clicked.connect(self.stop_encodings)
         
         self.resetLayout()
@@ -134,7 +167,7 @@ class NameSelector(QWidget):
     
     def stop_encodings(self):
         self.worker.deleteLater()
-        self.thread.quit()
+        self.thread.terminate()
         self.set_main_layout()
     
     def lookup(self):
@@ -142,7 +175,7 @@ class NameSelector(QWidget):
         submit_button.clicked.connect(self.perform_lookup)
 
         self.resetLayout()
-        self.add_research_widget()
+        self.add_research_widget(field_class=Looker)
         self.layout.addWidget(submit_button)
 
     def perform_lookup(self):
@@ -150,24 +183,28 @@ class NameSelector(QWidget):
         self.info_label = QLabel("Looking up for someone...\nThis may take a while\nUser intervention is not required")
         self.resetLayout()
         self.layout.addWidget(self.info_label)
-        self.face_classifier.load_known(name=name)
+        
+        result_folder = self.face_classifier.lookup(name)
+        # ensure the folder exists even if it is empty
+        if not result_folder.exists():
+            result_folder.mkdir()
+        subprocess.run(["explorer", str(result_folder)])
         self.set_main_layout()
 
     def closeEvent(self, event):
-        # TODO : does not work
-        self.stats_label = QLabel()
-        self.load_stats()
+        stats_label = QLabel(self.get_stats())
         self.resetLayout()
-        self.layout.addWidget(self.stats_label)
-        time.sleep(2)
+        self.layout.addWidget(stats_label)
+        print("Closing...")
+        QtTest.QTest.qWait(5000)
         return super().closeEvent(event)
     
-    def load_stats(self):
+    def get_stats(self):
         stats = self.face_classifier.get_stats()
+        display = ""
         for key, value in stats.items():
-            display = f"{key}: {value}"
-        self.stats_label.setText(display)
-
+            display += f"{key}: {value}\n"
+        return display
 
     def classify_images(self):
         self.image_label = QLabel()
@@ -188,7 +225,7 @@ class NameSelector(QWidget):
         self.layout.addWidget(submit_button)
         self.input_field.setFocus()
         
-        self.face_classifier.load_known(name_only=True)
+        self.face_classifier.load_known_names()
         if self.face_classifier.next():
             self.display_face()
         else:
@@ -268,38 +305,7 @@ class NameSelector(QWidget):
         )
 
 
-class Editor(QLineEdit):
-    def __init__(self):
-        super().__init__()
-
-    def clear(self):
-        super().clear()        
-        self.completer().setModel(QStringListModel(self.parent().face_classifier.known_names))
-
-    def keyPressEvent(self, event):
-        super().keyPressEvent(event)
-        text = event.text()
-        if text.isdigit():
-            self.parent().handle_action(int(text))
-        elif event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
-            self.parent().handle_name()
-
 def main():
-    # parser = argparse.ArgumentParser(
-    #     description='Detect Faces')
-    # parser.add_argument(
-    #     '-f', '--folder', help='Picture folders', type=str, default='demo')
-    # parser.add_argument(
-    #     '-s', '--skip', help='Skip encoding and perform name attribution', action='store_true')
-    # parser.add_argument(
-    #     '-r', '--restart', help='Restart the classification', action='store_true')
-    # parser.add_argument(
-    #     '-c', '--contact', help='Contact file path to look for names', type=str, default=None
-    #     )
-    # parser.add_argument(
-    #     '-e', '--eval', help='Use the training to look for someone', type=str, default=None
-    # )
-
     app = QApplication(sys.argv)
     window = NameSelector()
     window.show()
