@@ -4,12 +4,16 @@ import numpy as np
 import os
 from face import Face, Image # needed for the pickle loading
 
+import logging
+logger = logging.getLogger(__name__)
+
 UNKNOWN = "Unknown"
 BAD_QUALITY = "Bad Quality"
 AUTO = "Auto"
 SKIPPED = "Skipped"
 IMAGE_COUNT = "Image count"
 REMOVED = "Face detection removed"
+
 
 class FaceClassifier:
     def __init__(self, classified_folder, encoded_img_folder, k, threshold=0.66):
@@ -55,7 +59,7 @@ class FaceClassifier:
         self.distances = self.distances[proposer]
         if self.distances[0] < self.threshold:
             name = self.known_faces_name[proposer[0]]
-            print(f"Skipped photo {self.image.image_path.name} containing {name} with distance {self.distances[0]}")
+            logger.debug(f"Skipped photo {self.image.image_path.name} containing {name} with distance {self.distances[0]}")
             return self.save_face(name, auto=True, action=False)
         self.propositions = [
             self.known_faces_name[i] for i in proposer
@@ -68,7 +72,7 @@ class FaceClassifier:
 
             for self.face in self.image.faces:
                 if self.face.name and self.face.name and self.face.name!=BAD_QUALITY and self.face.name!=UNKNOWN:
-                    print(f"Known photo {self.image.image_path} containing {self.face.name}")
+                    logger.debug(f"Known photo {self.image.image_path} containing {self.face.name}")
                     self.known_names.add(self.face.name)
         self.encoded_img_paths = iter(self.encoded_img_folder.glob("*.pickle"))
 
@@ -141,7 +145,7 @@ class FaceClassifier:
             try: 
                 self.pickle_path = next(self.encoded_img_paths)
             except StopIteration:
-                print("No more images !")
+                logger.debug("No more images !")
                 return False
             
             with open(self.pickle_path, 'rb') as f:
@@ -164,21 +168,21 @@ class FaceClassifier:
             # if self.face.name == BAD_QUALITY or self.face.name == UNKNOWN:
             #     self.face.name = None
             # else:    
-            print(f"Known photo {self.image.image_path.name} containing {self.face.name}")
+            logger.debug(f"Known photo {self.image.image_path.name} containing {self.face.name}")
             return self.save_face(self.face.name, action=False)
         self.make_propositions()
         return True
     
     def revert(self):
         if not self.action:
-            print("No previous action")
+            logger.debug("No previous action")
             return
     
         with open(self.pickle_path, 'wb') as f:
             pickle.dump(self.image, f)
         
         self.pickle_path = self.action.pickle_path
-        print(f"Reverting {self.pickle_path.name}")
+        logger.debug(f"Reverting {self.pickle_path.name}")
         with open(self.pickle_path, 'rb') as f:
             self.image = pickle.load(f)
 
@@ -193,7 +197,7 @@ class FaceClassifier:
         self.reverting = True
    
     def save_face(self, name, auto=False, action=True, all_faces=False)->bool:
-        print(f"Saving {name} inside {self.image.image_path.name}")
+        logger.debug(f"Saving {name} inside {self.image.image_path.name}")
         self.face.name = name
         self.face.auto = auto
         

@@ -4,8 +4,10 @@ from pathlib import Path
 import pickle
 import numpy as np
 import face_recognition
-from PyQt5.QtCore import QRunnable, pyqtSignal, QThread,QObject
+from PyQt5.QtCore import pyqtSignal, QObject
 
+import logging
+logger = logging.getLogger(__name__)
 
 class Face:
     def __init__(self, location: list[int], encoding: np.ndarray, tmp_name=None, name=None, auto=False) -> None:
@@ -28,6 +30,7 @@ class Image:
             self.faces.append(face)
 
 class FaceDetector:
+    # Static for performance reasons
     @staticmethod
     def run(args):
         image_path, encodings_folder = args
@@ -49,7 +52,7 @@ class FaceDetector:
         with open(out_path, 'wb') as f:
             pickle.dump(image, f)
     
-class LaunchMultiprocessingPool(QObject):
+class MuliprocessFaceDetector(QObject):
     finished = pyqtSignal()
 
     def __init__(self, args):
@@ -57,13 +60,15 @@ class LaunchMultiprocessingPool(QObject):
         self.args = args
         num_cores = cpu_count()
         self.pool = Pool(num_cores*2)
-        
+        logger.debug("Plase look at the console to see the progress")
+
     def run(self):
         self.pool.map(FaceDetector.run, self.args)
         self.pool.close()
         self.pool.join()
+        logger.debug("Done")
         self.finished.emit()
-    
+
     def deleteLater(self) -> None:
         self.pool.terminate()
         super().deleteLater()

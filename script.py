@@ -1,19 +1,30 @@
-from multiprocessing import Pool, cpu_count
 import subprocess
-import time
-from PyQt5.QtCore import QStringListModel, Qt, QThreadPool, QThread, QTimer
-from PyQt5.QtGui import QPixmap, QImage, QCloseEvent
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QCompleter, QFileDialog, QCheckBox, QLayout
+from PyQt5.QtCore import QStringListModel, Qt, QThread
+from PyQt5.QtGui import QPixmap, QImage
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QCompleter, QFileDialog, QCheckBox, QLayout, QPlainTextEdit
 import sys
 from pathlib import Path
 from PyQt5.QtCore import QRect
 import tempfile
 from classification import BAD_QUALITY, UNKNOWN, FaceClassifier
-from concurrent.futures import ThreadPoolExecutor
+import logging
 
-from face import FaceDetector, LaunchMultiprocessingPool
+from face import MuliprocessFaceDetector
 from contacts import CSV
 from PyQt5 import QtTest
+
+logger = logging.getLogger("NameSelector")
+
+class QLogger(logging.Handler):
+    def __init__(self, parent):
+        super().__init__()
+        self.widget = QPlainTextEdit(parent)
+        self.widget.setReadOnly(True)
+        self.formatter = logging.Formatter("{asctime} > {message}", style='{', datefmt="%H:%M:%S") # {  name}
+
+    def emit(self, record):
+        msg = self.format(record)
+        self.widget.appendPlainText(msg)
 
 class Editor(QLineEdit):
     def clear(self):
@@ -48,7 +59,6 @@ class NameSelector(QWidget):
         self.k = 3
         self.face_classifier = FaceClassifier(self.classified_folder, self.encodings_folder, self.k)
 
-        # self.logs_field = QLabel() # TODO
         self.initialize()
         self.set_main_layout()
     
@@ -60,7 +70,7 @@ class NameSelector(QWidget):
         for file in self.contacts_folder.glob("*.csv"):
             contacts = CSV(file).contacts
             n = self.face_classifier.add_contacts(contacts)
-            print(f"{n} contacts successfully added")
+            logger.debug(f"{n} contacts successfully added")
     
     def set_main_layout(self):
         self.add_contacts_button = QPushButton("Add contacts")
@@ -104,9 +114,11 @@ class NameSelector(QWidget):
     def add_contacts(self):
         contact_file_button = QPushButton("Select a file with contacts")
         contact_file_button.clicked.connect(self.get_contact_file)
-
+        return_button = QPushButton("Return")
+        return_button.clicked.connect(self.set_main_layout)
         self.resetLayout()
         self.layout.addWidget(contact_file_button)
+        self.layout.addWidget(return_button)
 
     def get_contact_file(self):
         contact_file_path = Path(QFileDialog.getOpenFileName(self, "Select a file with contacts")[0])
@@ -116,23 +128,26 @@ class NameSelector(QWidget):
         
         contact_file_label = QLabel(contact_file_path.name)
         submit_button = QPushButton("Submit")
-        submit_button.clicked.connect(self.perform_add_contacts)
+        submit_button.clicked.connect(self.perform_add_contacts)        
         self.layout.addWidget(contact_file_label)
         self.layout.addWidget(submit_button)
     
     def perform_add_contacts(self):
         n = self.face_classifier.add_contacts(self.contacts)
         self.set_main_layout()
-        print(f"{n} contacts successfully added")
+        logger.debug(f"{n} contacts successfully added")
 
     def generate_encodings(self):
         image_folder_button = QPushButton("Select a folder with images")
         image_folder_button.clicked.connect(self.get_image_folder)
         self.recurse_image_folder = QCheckBox("Recurse subfolders ?")
         self.recurse_image_folder.setChecked(True)
+        return_button = QPushButton("Return")
+        return_button.clicked.connect(self.set_main_layout)
         self.resetLayout()
         self.layout.addWidget(image_folder_button)
         self.layout.addWidget(self.recurse_image_folder)
+        self.layout.addWidget(return_button)
     
     def get_image_folder(self):
         self.image_folder = QFileDialog.getExistingDirectory(self, "Select a folder with images")
@@ -151,7 +166,7 @@ class NameSelector(QWidget):
         args = [(image_path, self.encodings_folder) for image_path in self.image_paths]
 
         self.thread = QThread(self)
-        self.worker = LaunchMultiprocessingPool(args)
+        self.worker = MuliprocessFaceDetector(args)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.thread.finished.connect(self.stop_encodings)
@@ -173,10 +188,13 @@ class NameSelector(QWidget):
     def lookup(self):
         submit_button = QPushButton("Submit")
         submit_button.clicked.connect(self.perform_lookup)
+        return_button = QPushButton("Return")
+        return_button.clicked.connect(self.set_main_layout)
 
         self.resetLayout()
         self.add_research_widget(field_class=Looker)
-        self.layout.addWidget(submit_button)
+        self.layout.addWidget(submit_button) 
+        self.layout.addWidget(return_button)
 
     def perform_lookup(self):
         name = self.input_field.text()
@@ -189,15 +207,18 @@ class NameSelector(QWidget):
         if not result_folder.exists():
             result_folder.mkdir()
         subprocess.run(["explorer", str(result_folder)])
+        n = len(list(result_folder.glob("*")))
+        logger.debug(f"There are {n} matchs")
         self.set_main_layout()
 
     def closeEvent(self, event):
         stats_label = QLabel(self.get_stats())
         self.resetLayout()
         self.layout.addWidget(stats_label)
-        print("Closing...")
-        QtTest.QTest.qWait(5000)
-        return super().closeEvent(event)
+        logger.debug("Closing...")
+        QtTest.QTest.qWait(7000)
+        super().closeEvent(event)
+        self.parent().close()
     
     def get_stats(self):
         stats = self.face_classifier.get_stats()
@@ -211,10 +232,11 @@ class NameSelector(QWidget):
         self.propositions_label = QLabel()
         input_label = QLabel("Enter name or number:")
         revert_button = QPushButton("Revert")
-        submit_button = QPushButton("Submit")
-        
-        submit_button.clicked.connect(self.submit_name)
         revert_button.clicked.connect(self.revert_classification)
+        submit_button = QPushButton("Submit")
+        submit_button.clicked.connect(self.submit_name)
+        return_button = QPushButton("Return")
+        return_button.clicked.connect(self.set_main_layout)
         
         self.resetLayout()
         self.layout.addWidget(self.image_label)
@@ -223,6 +245,7 @@ class NameSelector(QWidget):
         self.add_research_widget()
         self.layout.addWidget(revert_button)
         self.layout.addWidget(submit_button)
+        self.layout.addWidget(return_button)
         self.input_field.setFocus()
         
         self.face_classifier.load_known_names()
@@ -304,11 +327,27 @@ class NameSelector(QWidget):
             "\n".join(propositions_lines)
         )
 
+class MainWindow(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle('NameSelector')
+        self.setGeometry(100, 100, 600, 800)
+
+        self.q_logger = QLogger(self)
+        # set root logger
+        logging.getLogger().addHandler(self.q_logger)
+        logging.getLogger().setLevel(logging.DEBUG)
+        layout = QVBoxLayout()
+        layout.addWidget(NameSelector())
+        layout.addWidget(self.q_logger.widget)
+        self.setLayout(layout)
+        self.show()
+
+
 
 def main():
     app = QApplication(sys.argv)
-    window = NameSelector()
-    window.show()
+    window = MainWindow()
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
