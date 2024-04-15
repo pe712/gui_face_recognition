@@ -1,17 +1,18 @@
 import subprocess
-from PyQt5.QtCore import QStringListModel, Qt, QThread
+from PyQt5.QtCore import QStringListModel, Qt, QThread, QTimer
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QCompleter, QFileDialog, QCheckBox, QLayout, QPlainTextEdit
 import sys
 from pathlib import Path
 from PyQt5.QtCore import QRect
 import tempfile
-from classification import BAD_QUALITY, UNKNOWN, FaceClassifier
+from classification import BAD_QUALITY, UNKNOWN, FaceClassifier, FaceResetter
 import logging
+from itertools import chain
 
 from face import MuliprocessFaceDetector
 from contacts import CSV
-from PyQt5 import QtTest
+from PyQt5.QtTest import QTest
 
 logger = logging.getLogger("NameSelector")
 
@@ -27,8 +28,14 @@ class QLogger(logging.Handler):
         self.widget.appendPlainText(msg)
 
 class Editor(QLineEdit):
+    def __init__(self, parent):
+        super().__init__(parent)
+        completer = QCompleter()
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.setCompleter(completer)
+
     def clear(self):
-        super().clear()        
+        super().clear()
         self.completer().setModel(QStringListModel(self.parent().face_classifier.known_names))
 
     def keyPressEvent(self, event):
@@ -73,23 +80,26 @@ class NameSelector(QWidget):
             logger.debug(f"{n} contacts successfully added")
     
     def set_main_layout(self):
-        self.add_contacts_button = QPushButton("Add contacts")
-        self.add_contacts_button.clicked.connect(self.add_contacts)
-        self.generate_encodings_button = QPushButton("Detect faces and generate encodings")
-        self.generate_encodings_button.clicked.connect(self.generate_encodings)
-        self.classify_images_button = QPushButton("Classify images")
-        self.classify_images_button.clicked.connect(self.classify_images)
-        self.lookup_button = QPushButton("Lookup for someone")
-        self.lookup_button.clicked.connect(self.lookup)
-        self.close_button = QPushButton("Close")
-        self.close_button.clicked.connect(self.close)
+        add_contacts_button = QPushButton("Add contacts")
+        add_contacts_button.clicked.connect(self.add_contacts)
+        generate_encodings_button = QPushButton("Detect faces and generate encodings")
+        generate_encodings_button.clicked.connect(self.generate_encodings)
+        classify_images_button = QPushButton("Classify images")
+        classify_images_button.clicked.connect(self.classify_images)
+        lookup_button = QPushButton("Lookup for someone")
+        lookup_button.clicked.connect(self.lookup)
+        reset_button = QPushButton("Reset")
+        reset_button.clicked.connect(self.reset)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.close)
 
         main_layout_widgets = [
-        self.add_contacts_button,
-        self.generate_encodings_button,
-        self.classify_images_button,
-        self.lookup_button,
-        self.close_button,
+        add_contacts_button,
+        generate_encodings_button,
+        classify_images_button,
+        lookup_button,
+        reset_button,
+        close_button,
         ]
         
         self.resetLayout()
@@ -98,11 +108,9 @@ class NameSelector(QWidget):
             self.layout.addWidget(widget)
     
     def add_research_widget(self, field_class=Editor):
-        self.input_field = field_class()
-        completer = QCompleter(self.face_classifier.known_names)
-        completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self.input_field.setCompleter(completer)
+        self.input_field = field_class(self)
         self.layout.addWidget(self.input_field)
+        self.input_field.clear()
         self.input_field.setFocus()
 
     def resetLayout(self, new_layout_class=QVBoxLayout):
@@ -112,16 +120,18 @@ class NameSelector(QWidget):
         self.layout = new_layout_class(self)
 
     def add_contacts(self):
-        contact_file_button = QPushButton("Select a file with contacts")
-        contact_file_button.clicked.connect(self.get_contact_file)
+        self.contact_file_button = QPushButton("Select a file with contacts")
+        self.contact_file_button.setToolTip("CSV file exported from Google contacts")  
+        self.contact_file_button.clicked.connect(self.get_contact_file)
         return_button = QPushButton("Return")
         return_button.clicked.connect(self.set_main_layout)
         self.resetLayout()
-        self.layout.addWidget(contact_file_button)
+        self.layout.addWidget(self.contact_file_button)
         self.layout.addWidget(return_button)
 
     def get_contact_file(self):
         contact_file_path = Path(QFileDialog.getOpenFileName(self, "Select a file with contacts")[0])
+        self.contact_file_button.setEnabled(False)
         self.contacts = CSV(contact_file_path).contacts
         save_path = self.contacts_folder/contact_file_path.name
         save_path.write_bytes(contact_file_path.read_bytes())
@@ -160,16 +170,15 @@ class NameSelector(QWidget):
 
     def perform_generate_encodings(self):
         if self.recurse_image_folder.isChecked():
-            self.image_paths = self.image_folder.rglob("*")
+            self.image_paths = chain(self.image_folder.rglob("*.jpg"), self.image_folder.rglob("*.png"), self.image_folder.rglob("*.jpeg"))
         else:
-            self.image_paths = self.image_folder.glob("*")
+            self.image_paths = chain(self.image_folder.glob("*.jpg"), self.image_folder.glob("*.png"), self.image_folder.glob("*.jpeg"))
         args = [(image_path, self.encodings_folder) for image_path in self.image_paths]
 
         self.thread = QThread(self)
         self.worker = MuliprocessFaceDetector(args)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
-        self.thread.finished.connect(self.stop_encodings)
         self.thread.start()
         info_label = QLabel("Detecting faces...\nThis may take a while\nUser intervention is not required")
         stop_button = QPushButton("Return")
@@ -179,7 +188,6 @@ class NameSelector(QWidget):
         self.layout.addWidget(info_label)
         self.layout.addWidget(stop_button)
 
-    
     def stop_encodings(self):
         self.worker.deleteLater()
         self.thread.terminate()
@@ -211,12 +219,38 @@ class NameSelector(QWidget):
         logger.debug(f"There are {n} matchs")
         self.set_main_layout()
 
+    def reset(self):
+        check_label = QLabel("Encodings will not be deleted. This will delete every known classification. Do you want to proceed ?")
+        check_button = QPushButton("Yes")
+        check_button.clicked.connect(self.perform_reset)
+        return_button = QPushButton("Return")
+        return_button.clicked.connect(self.set_main_layout)
+        self.resetLayout()
+        self.layout.addWidget(check_label)
+        self.layout.addWidget(check_button)
+        self.layout.addWidget(return_button)
+    
+    def perform_reset(self):
+        self.thread = QThread(self)        
+        self.worker = FaceResetter(self.face_classifier)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.run)
+        self.thread.start()
+
+        info_label = QLabel("Resetting...\nThis may take a while\nUser intervention is not required.")
+        return_button = QPushButton("Return")
+        return_button.clicked.connect(self.set_main_layout)
+
+        self.resetLayout()
+        self.layout.addWidget(info_label)
+        self.layout.addWidget(return_button)
+
     def closeEvent(self, event):
         stats_label = QLabel(self.get_stats())
         self.resetLayout()
         self.layout.addWidget(stats_label)
         logger.debug("Closing...")
-        QtTest.QTest.qWait(7000)
+        QTest.qWait(7000)
         super().closeEvent(event)
         self.parent().close()
     

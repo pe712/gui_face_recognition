@@ -1,11 +1,21 @@
+from multiprocessing import Pool, cpu_count
 import pickle
 import face_recognition
 import numpy as np
 import os
 from face import Face, Image # needed for the pickle loading
-
+from enum import StrEnum, auto
 import logging
+from PyQt5.QtCore import QObject
 logger = logging.getLogger(__name__)
+
+class SecialNames(StrEnum):
+    UNKNOWN = auto()
+    BAD_QUALITY = auto()
+    AUTO = auto()
+    SKIPPED = auto()
+    IMAGE_COUNT = auto()
+    REMOVED = auto() 
 
 UNKNOWN = "Unknown"
 BAD_QUALITY = "Bad Quality"
@@ -102,7 +112,19 @@ class FaceClassifier:
             with open(self.pickle_path, 'wb') as f:
                 pickle.dump(self.image, f)
         self.encoded_img_paths = iter(second_run)
+   
+    def reset(self):
+        for self.pickle_path in self.encoded_img_folder.glob("*.pickle"):
+            with open(self.pickle_path, 'rb') as f:
+                self.image = pickle.load(f)
 
+            for self.face in self.image.faces:
+                self.face.name= None
+                self.face.auto = False
+
+            with open(self.pickle_path, 'wb') as f:
+                pickle.dump(self.image, f)
+    
     def update_stats(self):
         if self.removed:
             self.stats[REMOVED]+= 1
@@ -255,3 +277,12 @@ class Action:
         self.pickle_path = pickle_path
         self.previous_face = face
         self.previous_index = index
+
+class FaceResetter(QObject):
+    def __init__(self, face_classifier:FaceClassifier):
+        super().__init__()
+        self.face_classifier = face_classifier
+
+    def run(self):
+        self.face_classifier.reset
+        logger.debug("Done")
