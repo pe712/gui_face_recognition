@@ -1,12 +1,12 @@
 import subprocess
-from PyQt5.QtCore import QStringListModel, Qt, QThread, QTimer
+from PyQt5.QtCore import QStringListModel, Qt, QThread
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QCompleter, QFileDialog, QCheckBox, QLayout, QPlainTextEdit
 import sys
 from pathlib import Path
 from PyQt5.QtCore import QRect
 import tempfile
-from classification import BAD_QUALITY, UNKNOWN, FaceClassifier, FaceResetter
+from classification import FaceClassifier, FaceResetter, SpecialNames
 import logging
 from itertools import chain
 
@@ -15,6 +15,25 @@ from contacts import CSV
 from PyQt5.QtTest import QTest
 
 logger = logging.getLogger("NameSelector")
+
+class Action:
+    def __init__(self, action, label, callback):
+        self.action = action
+        self.label = label
+        self.callback = callback
+    
+    def __eq__(self, __value) -> bool:
+        return self.action == __value
+
+    def __call__(self)->bool:
+        return self.callback()
+        
+    def __str__(self):
+        return f"{self.action} : {self.label}"
+
+    def __hash__(self) -> int:
+        return hash(self.action)
+        
 
 class QLogger(logging.Handler):
     def __init__(self, parent):
@@ -65,7 +84,17 @@ class NameSelector(QWidget):
                 
         self.k = 3
         self.face_classifier = FaceClassifier(self.classified_folder, self.encodings_folder, self.k)
-
+        
+        actions_params = [
+            ("Unknown", lambda: self.face_classifier.save_face(SpecialNames.UNKNOWN)),
+            ("Unknown for all faces in the image", lambda: self.face_classifier.save_face(SpecialNames.UNKNOWN, all_faces=True)),
+            ("Bad quality", lambda: self.face_classifier.save_face(SpecialNames.BAD_QUALITY)),
+            ("Bad quality for all faces in the image", lambda: self.face_classifier.save_face(SpecialNames.BAD_QUALITY, all_faces=True)),
+            ("Not a face", self.face_classifier.remove_face),
+            ("Skip", self.face_classifier.skip_face),
+            ("Skip all faces in the image", lambda: self.face_classifier.skip_face(all_faces=True)),
+        ]
+        self._actions = [Action(self.k + i, label, callback) for i, (label, callback) in enumerate(actions_params)]
         self.initialize()
         self.set_main_layout()
     
@@ -84,8 +113,8 @@ class NameSelector(QWidget):
         add_contacts_button.clicked.connect(self.add_contacts)
         generate_encodings_button = QPushButton("Detect faces and generate encodings")
         generate_encodings_button.clicked.connect(self.generate_encodings)
-        classify_images_button = QPushButton("Classify images")
-        classify_images_button.clicked.connect(self.classify_images)
+        classify_faces_button = QPushButton("Classify faces")
+        classify_faces_button.clicked.connect(self.classify_faces)
         lookup_button = QPushButton("Lookup for someone")
         lookup_button.clicked.connect(self.lookup)
         reset_button = QPushButton("Reset")
@@ -96,7 +125,7 @@ class NameSelector(QWidget):
         main_layout_widgets = [
         add_contacts_button,
         generate_encodings_button,
-        classify_images_button,
+        classify_faces_button,
         lookup_button,
         reset_button,
         close_button,
@@ -261,7 +290,7 @@ class NameSelector(QWidget):
             display += f"{key}: {value}\n"
         return display
 
-    def classify_images(self):
+    def classify_faces(self):
         self.image_label = QLabel()
         self.propositions_label = QLabel()
         input_label = QLabel("Enter name or number:")
@@ -300,20 +329,8 @@ class NameSelector(QWidget):
     def handle_action(self, action):
         if action < self.k:
             success = self.face_classifier.save_face(self.face_classifier.propositions[action])
-        elif action == self.k:
-            success = self.face_classifier.save_face(UNKNOWN)
-        elif action == self.k+1:
-            success = self.face_classifier.save_face(UNKNOWN, all_faces=True)
-        elif action == self.k+2:
-            success = self.face_classifier.save_face(BAD_QUALITY)
-        elif action == self.k+3:
-            success = self.face_classifier.save_face(BAD_QUALITY, all_faces=True)
-        elif action == self.k+4:
-            success = self.face_classifier.remove_face()
-        elif action == self.k+5:
-            success = self.face_classifier.skip_face()
-        elif action == self.k+6:
-            success = self.face_classifier.skip_face(all_faces=True)
+        else:
+            success = self._actions[action - self.k]()
         if success:
             self.input_callback()
         else:
@@ -350,13 +367,7 @@ class NameSelector(QWidget):
     def render_propositions(self):
         propositions_lines = [f"{i} : {prop} ({score})" for i,
                         (prop, score) in enumerate(zip(self.face_classifier.propositions, self.face_classifier.distances))]
-        propositions_lines.append(f"{self.k} : Unknown")
-        propositions_lines.append(f"{self.k+1} : Unknown for all faces in the image")
-        propositions_lines.append(f"{self.k+2} : Bad quality")
-        propositions_lines.append(f"{self.k+3} : Bad quality for all faces in the image")
-        propositions_lines.append(f"{self.k+4} : Not a face")
-        propositions_lines.append(f"{self.k+5} : Skip")
-        propositions_lines.append(f"{self.k+6} : Skip all faces in the image")
+        propositions_lines.extend([str(action) for action in self._actions])
         self.propositions_label.setText(
             "\n".join(propositions_lines)
         )

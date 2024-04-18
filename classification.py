@@ -1,28 +1,28 @@
-from multiprocessing import Pool, cpu_count
 import pickle
 import face_recognition
 import numpy as np
 import os
 from face import Face, Image # needed for the pickle loading
-from enum import StrEnum, auto
+from enum import EnumMeta, StrEnum, auto
 import logging
 from PyQt5.QtCore import QObject
 logger = logging.getLogger(__name__)
 
-class SecialNames(StrEnum):
+class MetaEnum(EnumMeta):
+    def __contains__(self, __key: str) -> bool:
+        if isinstance(__key,  str):
+            return __key in self._value2member_map_
+        return super().__contains__(__key)
+
+class SpecialNames(StrEnum, metaclass=MetaEnum):
     UNKNOWN = auto()
     BAD_QUALITY = auto()
-    AUTO = auto()
     SKIPPED = auto()
-    IMAGE_COUNT = auto()
-    REMOVED = auto() 
+    REMOVED = auto()
 
-UNKNOWN = "Unknown"
-BAD_QUALITY = "Bad Quality"
-AUTO = "Auto"
-SKIPPED = "Skipped"
-IMAGE_COUNT = "Image count"
-REMOVED = "Face detection removed"
+class ClassifierStats(StrEnum, metaclass=MetaEnum):
+    AUTO = auto()
+    IMAGE_COUNT = auto()
 
 
 class FaceClassifier:
@@ -42,12 +42,18 @@ class FaceClassifier:
         self.propositions, self.distances = [], []
         self.face = None
         
-        self.removed = False
         self.action = None # used to track the last user action to be able to revert
         self.previous_pickle_path = None
         self.reverting = False
         
-        self.stats = {BAD_QUALITY: 0, UNKNOWN: 0, AUTO: 0, SKIPPED: 0, IMAGE_COUNT: 0, REMOVED: 0}
+        self.stats = {
+            SpecialNames.BAD_QUALITY: 0,
+            SpecialNames.UNKNOWN: 0,
+            SpecialNames.SKIPPED: 0,
+            SpecialNames.REMOVED: 0,
+            ClassifierStats.AUTO: 0, 
+            ClassifierStats.IMAGE_COUNT: 0, 
+            }
         
         self.next_image = True
     
@@ -81,7 +87,7 @@ class FaceClassifier:
                 self.image = pickle.load(f)
 
             for self.face in self.image.faces:
-                if self.face.name and self.face.name and self.face.name!=BAD_QUALITY and self.face.name!=UNKNOWN:
+                if self.face.name and not self.face.name in SpecialNames:
                     logger.debug(f"Known photo {self.image.image_path} containing {self.face.name}")
                     self.known_names.add(self.face.name)
         self.encoded_img_paths = iter(self.encoded_img_folder.glob("*.pickle"))
@@ -126,24 +132,18 @@ class FaceClassifier:
                 pickle.dump(self.image, f)
     
     def update_stats(self):
-        if self.removed:
-            self.stats[REMOVED]+= 1
-            self.removed = False
-            return
         if self.face.auto:
-            self.stats[AUTO] += 1
+            self.stats[ClassifierStats.AUTO] += 1
         if not self.face.name:
             if self.next_image:
-                self.stats[SKIPPED] += len(self.image.faces)
+                self.stats[SpecialNames.SKIPPED] += len(self.image.faces)
             else:
-                self.stats[SKIPPED] += 1
-        elif self.face.name == BAD_QUALITY:
-            self.stats[BAD_QUALITY] += 1
-        elif self.face.name == UNKNOWN:
-            self.stats[UNKNOWN] += 1
+                self.stats[SpecialNames.SKIPPED] += 1
+        elif self.face.name in SpecialNames:
+            self.stats[self.face.name] += 1
     
     def update_image_count(self):
-        self.stats[IMAGE_COUNT] += 1
+        self.stats[ClassifierStats.IMAGE_COUNT] += 1
 
     def get_stats(self) -> dict:
         total = 0
@@ -179,9 +179,9 @@ class FaceClassifier:
         try:
             self.face = next(self.faces)
             if self.bad_quality_for_all_faces:
-                return self.save_face(BAD_QUALITY, all_faces=True)
+                return self.save_face(SpecialNames.BAD_QUALITY, all_faces=True)
             if self.unknown_for_all_faces:
-                return self.save_face(UNKNOWN, all_faces=True)
+                return self.save_face(SpecialNames.UNKNOWN, all_faces=True)
         except StopIteration:
             self.next_image = True
             return self.next()
@@ -235,11 +235,11 @@ class FaceClassifier:
             self.known_faces_encoding.append(self.face.encoding)
             self.known_names.add(name)
 
-        if name == BAD_QUALITY:
+        if name == SpecialNames.BAD_QUALITY:
             self.bad_quality_for_all_faces = all_faces
             return self.next()
     
-        if name==UNKNOWN:
+        if name==SpecialNames.UNKNOWN:
             self.unknown_for_all_faces = all_faces
             return self.next()
         
@@ -255,10 +255,8 @@ class FaceClassifier:
         return self.next()
 
     def remove_face(self)->bool:
-        self.image.faces.remove(self.face)
-        self.removed = True
-        self.update_stats()
-        return self.next()
+        self._update_action()
+        return self.save_face(SpecialNames.REMOVED, action=True)
 
     def skip_face(self, all_faces=False)->bool:
         self._update_action()
@@ -279,6 +277,9 @@ class Action:
         self.previous_index = index
 
 class FaceResetter(QObject):
+    """
+    QObject wrapper for FaceClassifier.reset method
+    """
     def __init__(self, face_classifier:FaceClassifier):
         super().__init__()
         self.face_classifier = face_classifier
