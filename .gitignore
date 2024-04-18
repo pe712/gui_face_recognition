@@ -5,3 +5,4 @@ contacts
 *.pyc
 .venv
 .vscode
+__pycache__

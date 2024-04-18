@@ -1,6 +1,1 @@
-Should classify false positive faces as FALSE_POSITIVE and not delete them
-use the enum SPECIAL_NAME
-
-Connect the console output when generating encodings to the logger, (optionnal)
-
-Cleanify the action handler
+* When using subprocess, the logging is done to the console and not to the QWindow. Maybe it is not possible because the subprocess is in its own process.
